@@ -23,13 +23,12 @@ input_layers_list = {0: "High_Flow_Hydrants",
 target_tile_service_id = "ec3c842d5a6e456091fe6a2052ee3e78"
 target_tpkx_id = "360a51375bae4f75975f7705d6f086a6"
 output_service_name = "Script_Cache_New"  # (should not be the same as the service we're overwriting or there will be an error)
-
-# should be in reverse order of input layers list
 layer_files = ["Old Standard Hydrants.lyrx",
                "Not Flow Tested.lyrx",
                "Non-Working Hydrants.lyrx",
                "New Standard Hydrants.lyrx",
-               "High Flow Hydrants.lyrx"]
+               "High Flow Hydrants.lyrx"
+               ]
 org_url = "https://ps-cc.maps.arcgis.com/home"
 keyring_id = "pscc"
 org_username = "gbushong_PS_CC"
@@ -56,15 +55,11 @@ def cleanup_files(delete_file):
 
 
 def main():
+    print(f"Active Portal: {arcpy.GetActivePortalURL()}")
+
     # set up logger
     logging.basicConfig(filename=f"{HOME_FOLDER}/publishing.log", format='%(asctime)s - %(levelname)s - %(message)s')
     logging.getLogger().setLevel(logging.getLevelName('INFO'))
-
-    log(f"Active Portal: {arcpy.GetActivePortalURL()}")
-
-    # test GIS login
-    # pw = keyring.get_password(keyring_id, org_username)
-    # gis = arcgis.gis.GIS(org_url, org_username, pw)
 
     # get project and map
     aprx = arcpy.mp.ArcGISProject(os.path.join(output_folder, aprx_name))
@@ -74,29 +69,33 @@ def main():
 
     # TODO: maybe do an initial table comparison to see if anything has actually changed??
 
-    # Remove old projected layers from map
+    # for each layer, do feature class to feature class
+    log("Creating feature classes from services")
+    for layer_id in input_layers_list:
+        arcpy.MakeFeatureLayer_management(os.path.join(input_service_url, str(layer_id)),"tmp")
+        arcpy.conversion.FeatureClassToFeatureClass("tmp", os.path.join(output_folder, output_gdb), input_layers_list[layer_id])
+
+    # add projected layers to map and remove old ones
     for lyr in m.listLayers():
         if lyr.name != "Manage_Tile_Cache_Area_of_Interest_Polygons":
             log(f"Removing {lyr.name} from the map")
             m.removeLayer(lyr)
 
+    # remove files before overwriting
+    log("Removing files from gdb")
+    for layer_id in input_layers_list:
+        cleanup_files(os.path.join(output_folder, output_gdb, f"{input_layers_list[layer_id]}_Project"))
+
+    # project from 26985 to 3857
+    log("Projecting new service versions to the correct projection")
     input_project_str = "PROJCS['WGS_1984_Web_Mercator_Auxiliary_Sphere',GEOGCS['GCS_WGS_1984',DATUM['D_WGS_1984',SPHEROID['WGS_1984',6378137.0,298.257223563]],PRIMEM['Greenwich',0.0],UNIT['Degree',0.0174532925199433]],PROJECTION['Mercator_Auxiliary_Sphere'],PARAMETER['False_Easting',0.0],PARAMETER['False_Northing',0.0],PARAMETER['Central_Meridian',0.0],PARAMETER['Standard_Parallel_1',0.0],PARAMETER['Auxiliary_Sphere_Type',0.0],UNIT['Meter',1.0]]"
     projection = "WGS_1984_(ITRF00)_To_NAD_1983"
     output_project_str = "PROJCS['NAD_1983_StatePlane_Maryland_FIPS_1900',GEOGCS['GCS_North_American_1983',DATUM['D_North_American_1983',SPHEROID['GRS_1980',6378137.0,298.257222101]],PRIMEM['Greenwich',0.0],UNIT['Degree',0.0174532925199433]],PROJECTION['Lambert_Conformal_Conic'],PARAMETER['False_Easting',400000.0],PARAMETER['False_Northing',0.0],PARAMETER['Central_Meridian',-77.0],PARAMETER['Standard_Parallel_1',38.3],PARAMETER['Standard_Parallel_2',39.45],PARAMETER['Latitude_Of_Origin',37.66666666666666],UNIT['Meter',1.0]]"
 
-    log("Creating feature classes from services")
-    log("Removing old projection files from gdb and projecting new service versions to 3857")
     for layer_id in input_layers_list:
-        # for each layer, do feature class to feature class
-        arcpy.conversion.FeatureClassToFeatureClass(os.path.join(input_service_url, str(layer_id)), os.path.join(output_folder, output_gdb), input_layers_list[layer_id])
-
-        # remove old projection file before overwriting
-        cleanup_files(os.path.join(output_folder, output_gdb, f"{input_layers_list[layer_id]}_Project"))
-
-        # project from 26985 to 3857
         arcpy.management.Project(input_layers_list[layer_id], os.path.join(output_folder, output_gdb, f"{input_layers_list[layer_id]}_Project"), input_project_str, projection, output_project_str, "NO_PRESERVE_SHAPE", None, "NO_VERTICAL")
 
-        # add layer to the map document
+    for layer_id in input_layers_list:
         m.addDataFromPath(os.path.join(output_folder, output_gdb, f"{input_layers_list[layer_id]}_Project"))
 
     # log layers present in map and apply symbology
@@ -104,6 +103,8 @@ def main():
     for lyr, lyrx in zip(m.listLayers(), layer_files):
         arcpy.ApplySymbologyFromLayer_management(lyr, os.path.join(output_folder, lyrx))
         log(lyr.name)
+
+    # TODO: remove minimum scale and make visible
 
     # manage tile cache
     log("Running manage tile cache")
@@ -126,16 +127,16 @@ def main():
     pw = keyring.get_password(keyring_id, org_username)
     gis = arcgis.gis.GIS(org_url, org_username, pw)
 
-    # Remove old archives
-    curr_timestamp = time.strftime("%Y%m%d")
+    # Remove archives from 1 hour + ago
+    # curr_timestamp = time.strftime("%Y%m%d")
     gis_items = gis.content.search("title:archive_ AND owner:{}".format(org_username), item_type="Map Image Layer")
-    for item in gis_items:
-        match = re.search(f"archive_{curr_timestamp}_.*", item.title)
-        if match:
-            log(f"Keeping last hour's archive: {item.title}")
-        else:
-            log(f"Deleting old archive: {item.title}")
-            item.delete()
+    # If there are more than one archived services
+    if len(gis_items) > 1:
+        for item in gis_items:
+            match = re.search("archive_[0-9]{8}_[0-9]{4}", item.title)
+            if match:
+                log(f"Deleting old archive: {item.title}")
+                item.delete()
 
     # Archive old service
     try:
